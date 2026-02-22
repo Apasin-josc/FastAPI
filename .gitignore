@@ -1,0 +1,17 @@
+# Virtual environments
+fastapienv/
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite local DB *.db
+
+# Tooling / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
