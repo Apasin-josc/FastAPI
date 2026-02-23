@@ -97,7 +97,7 @@ models.Base.metadata.create_all(bind=engine)
 
 ## 10. Session de DB, dependency injection, `single_todo`, `create_todo`, `update_todo` y `delete_todo` en `main.py`
 
-En esta sesion agregaste el manejo de sesion con `SessionLocal`, el dependency provider `get_db()`, endpoints para listar, buscar por id, crear, actualizar y eliminar todos.
+En esta sesion agregamos el manejo de sesion con `SessionLocal`, el dependency provider `get_db()` y endpoints para listar, buscar por id, crear, actualizar y eliminar todos.
 
 ```python
 from fastapi import FastAPI, Depends, HTTPException, Path
@@ -333,6 +333,311 @@ Flujo por request:
 6. Al terminar, se ejecuta `finally` y se cierra con `db.close()`.
 
 Piensalo asi: `database.py` prepara la fabrica, `get_db()` crea una sesion por request, y FastAPI te la entrega en `db`.
+
+## 17. Starting Authentication & Authorization
+
+En esta parte empezaste la estructura de autenticacion/autorizacion separando rutas en un router dedicado.
+
+Objetivo de este paso:
+
+- preparar un archivo de auth separado del `main.py`
+- escalar mejor la app por modulos
+- dejar lista la base para agregar login, JWT, y proteccion de endpoints despues
+
+## 18. Routers Scale Authentication File
+
+### 1. Crear carpeta y archivo de router
+
+Ruta usada:
+
+- `TodoApp/routers/auth.py`
+- `TodoApp/routers/__init__.py`
+
+Codigo actual en `TodoApp/routers/auth.py`:
+
+```python
+from fastapi import APIRouter
+
+"""
+APIRouter will allow us to be able to route from our main.py file to our auth.py file
+"""
+
+router = APIRouter()
+
+@router.get("/auth/")
+async def get_user():
+    return {'user': 'authenticated'}
+```
+
+### 2. Conectar el router en `main.py`
+
+Agregaste import e inclusion del router:
+
+```python
+from routers import auth
+
+app.include_router(
+    auth.router
+)
+```
+
+Con esto, el endpoint de auth ya queda disponible en:
+
+- `GET /auth/`
+
+Respuesta esperada:
+
+```json
+{
+  "user": "authenticated"
+}
+```
+
+Nota: en esta fase todavia no hay validacion real de usuario (no JWT/no password hash). Es una base para el modulo de auth que sigue en el curso.
+
+## 19. FastAPI Project: Router Scale Todos File
+
+En esta sesion moviste todo el CRUD de todos fuera de `main.py` para dejar la aplicacion mas limpia y escalable.
+
+### 1. Crear router de todos
+
+Archivo usado:
+
+- `TodoApp/routers/todos.py`
+
+En este archivo dejamos:
+
+- `router = APIRouter()`
+- `get_db()` y `db_dependency`
+- `TodoRequest` (schema de Pydantic)
+- endpoints CRUD:
+  - `GET /`
+  - `GET /todo/{todo_id}`
+  - `POST /todo`
+  - `PUT /todo/{todo_id}`
+  - `DELETE /todo/{todo_id}`
+
+### 2. Limpiar `main.py`
+
+Ahora `main.py` queda como punto de arranque y registro de routers:
+
+```python
+from fastapi import FastAPI
+import models
+from database import engine
+from routers import auth, todos
+
+app = FastAPI()
+
+# this is going to run if our todos.db does not exist
+models.Base.metadata.create_all(bind=engine)
+
+app.include_router(auth.router)
+app.include_router(todos.router)
+```
+
+### 3. Resultado de esta refactorizacion
+
+- `main.py` queda corto y facil de leer.
+- Cada modulo maneja su responsabilidad (`auth.py`, `todos.py`).
+- Es mas facil crecer el proyecto (ejemplo: `users.py`, `admin.py`, `health.py`).
+
+Nota: en este punto los endpoints no cambian, solo cambia la organizacion del codigo.
+
+## 20. Users Table + Foreign Key (One-to-Many)
+
+En esta sesion agregamos una tabla `users` y conectamos `todos` con `users` usando una clave foranea.
+
+Cambios en `TodoApp/models.py`:
+
+- nuevo modelo `Users`
+- nuevo campo `owner_id` en `Todos`
+- `owner_id` apunta a `users.id` con `ForeignKey("users.id")`
+
+Codigo actual (resumen):
+
+```python
+class Users(Base):
+    __tablename__ = 'users'
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True)
+    username = Column(String, unique=True)
+    first_name = Column(String)
+    last_name = Column(String)
+    hashed_password = Column(String)
+    is_active = Column(Boolean, default=True)
+    role = Column(String)
+
+class Todos(Base):
+    __tablename__ = 'todos'
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)
+    description = Column(String)
+    priority = Column(Integer)
+    complete = Column(Boolean, default=False)
+    owner_id = Column(Integer, ForeignKey("users.id"))
+```
+
+### Que significa One-to-Many
+
+- One (`Users`): un usuario.
+- Many (`Todos`): muchos todos.
+
+Interpretacion:
+
+- un usuario puede tener muchos todos
+- cada todo pertenece a un solo usuario (por `owner_id`)
+
+### Diagrama rapido (ERD)
+
+```text
+users
+-----
+id (PK)
+email (UNIQUE)
+username (UNIQUE)
+first_name
+last_name
+hashed_password
+is_active
+role
+   1
+   |
+   |  (owner_id -> users.id)
+   |
+   * 
+todos
+-----
+id (PK)
+title
+description
+priority
+complete
+owner_id (FK)
+```
+
+### Ejemplo de relacion
+
+Si existe:
+
+- `users.id = 3`
+
+Entonces todos estos registros pueden ser del mismo usuario:
+
+- `todos.owner_id = 3` (todo A)
+- `todos.owner_id = 3` (todo B)
+- `todos.owner_id = 3` (todo C)
+
+### Nota importante para SQLite local
+
+Si ya tenia creado `todos.db` antes de este cambio, es posible que mi DB vieja no tenga la estructura nueva.
+
+Opciones rapidas durante aprendizaje:
+
+1. borrar `todos.db` y volver a correr la app para recrear tablas
+2. usar migraciones (Alembic) cuando quieras manejar cambios sin borrar datos
+
+## 21. First User Creation (Auth) and Why Not `model_dump`
+
+En esta sesion creaste tu primer endpoint para registrar usuario en `TodoApp/routers/auth.py`.
+
+Modelo request actual:
+
+```python
+class CreateUserRequest(BaseModel):
+    username: str
+    email: str
+    first_name: str
+    last_name: str
+    password: str
+    role: str
+```
+
+Endpoint actual:
+
+```python
+@router.post("/auth/")
+async def create_user(create_user_request: CreateUserRequest):
+    create_user_model = Users(
+        email=create_user_request.email,
+        username=create_user_request.username,
+        first_name=create_user_request.first_name,
+        last_name=create_user_request.last_name,
+        role=create_user_request.role,
+        hashed_password=create_user_request.password,
+        is_active=True
+    )
+
+    return create_user_model
+```
+
+### Por que aqui no usaste `**todo_request.model_dump()`
+
+En `todos`, el request se parece mucho a la tabla y podia hacer unpack directo.
+
+En `users`, la logica cambia:
+
+- el cliente envia `password`
+- en DB guardas `hashed_password`
+
+Entonces no conviene copiar todo directo. Es mejor mapear campo por campo para transformar datos sensibles.
+
+### Nota de seguridad (siguiente paso del curso)
+
+Ahora mismo `hashed_password` esta recibiendo `password` sin hash real.
+
+Lo correcto es:
+
+- hashear con `bcrypt` (o similar)
+- guardar solo el hash en `hashed_password`
+- nunca guardar el password plano en la DB
+
+## 22. Password Hashing with `passlib` + `bcrypt==4.0.1`
+
+En esta sesion agregamos hashing real para contrasenas de usuarios.
+
+Instalacion que hice:
+
+```powershell
+pip install passlib
+pip install bcrypt==4.0.1
+```
+
+Nota del curso: fijamos la version `bcrypt==4.0.1` para evitar problemas de compatibilidad con `passlib` en este entorno.
+
+Cambios en `TodoApp/routers/auth.py`:
+
+- import de `CryptContext`
+- creacion de `bcrypt_context`
+- uso de `bcrypt_context.hash(...)` al crear usuario
+
+```python
+from passlib.context import CryptContext
+
+bcrypt_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
+
+@router.post("/auth")
+async def create_user(create_user_request: CreateUserRequest):
+    create_user_model = Users(
+        email=create_user_request.email,
+        username=create_user_request.username,
+        first_name=create_user_request.first_name,
+        last_name=create_user_request.last_name,
+        role=create_user_request.role,
+        hashed_password=bcrypt_context.hash(create_user_request.password),
+        is_active=True
+    )
+
+    return create_user_model
+```
+
+### Que gano esta mejora
+
+- ya no guardas passwords en texto plano
+- en DB se guarda solo `hashed_password`
+- mejora base de seguridad para login/autorizacion en los siguientes pasos
 
 ## Errores comunes
 
