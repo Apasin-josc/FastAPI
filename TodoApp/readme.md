@@ -639,6 +639,63 @@ async def create_user(create_user_request: CreateUserRequest):
 - en DB se guarda solo `hashed_password`
 - mejora base de seguridad para login/autorizacion en los siguientes pasos
 
+## 23. Auth Persisting User in DB (Dependency + Commit)
+
+En esta sesion mejoramos el endpoint de auth para que ya no solo construya el objeto `Users`, sino que tambien lo guarde de verdad en la base de datos.
+
+Cambios que hicimos en `TodoApp/routers/auth.py`:
+
+- agregamos `Depends`, `Annotated`, `SessionLocal` y `Session`
+- creamos `get_db()` dentro del router de auth
+- definimos `db_dependency = Annotated[Session, Depends(get_db)]`
+- el `POST /auth` ahora recibe `db: db_dependency`
+- agregamos `status_code=status.HTTP_201_CREATED`
+- guardamos el usuario con `db.add(...)` y `db.commit()`
+
+Codigo actual (resumen):
+
+```python
+from fastapi import APIRouter, Depends
+from passlib.context import CryptContext
+from typing import Annotated
+from database import SessionLocal
+from sqlalchemy.orm import Session
+from starlette import status
+
+router = APIRouter()
+bcrypt_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+db_dependency = Annotated[Session, Depends(get_db)]
+
+@router.post("/auth", status_code=status.HTTP_201_CREATED)
+async def create_user(db: db_dependency, create_user_request: CreateUserRequest):
+    create_user_model = Users(
+        email=create_user_request.email,
+        username=create_user_request.username,
+        first_name=create_user_request.first_name,
+        last_name=create_user_request.last_name,
+        role=create_user_request.role,
+        hashed_password=bcrypt_context.hash(create_user_request.password),
+        is_active=True
+    )
+
+    db.add(create_user_model)
+    db.commit()
+```
+
+Que ganamos con este paso:
+
+- el endpoint ya persiste datos en `users` (antes solo retornaba el objeto)
+- seguimos guardando password hasheada, no texto plano
+- auth queda alineado con el mismo patron de sesion DB que usamos en `todos`
+
 ## Errores comunes
 
 - `TypeError: 'check_Same_thread' is an invalid keyword argument for Connection()`
