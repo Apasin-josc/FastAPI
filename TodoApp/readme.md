@@ -696,6 +696,214 @@ Que ganamos con este paso:
 - seguimos guardando password hasheada, no texto plano
 - auth queda alineado con el mismo patron de sesion DB que usamos en `todos`
 
+## 24. Login Check with `OAuth2PasswordRequestForm` (`/token`)
+
+En esta sesion agregamos la primera validacion de login en auth.
+
+Que agregamos en `TodoApp/routers/auth.py`:
+
+- import de `OAuth2PasswordRequestForm`
+- funcion `authenticate_user(username, password, db)`
+- endpoint `POST /token` para validar credenciales
+- validacion con `bcrypt_context.verify(...)`
+
+Codigo clave:
+
+```python
+from fastapi.security import OAuth2PasswordRequestForm
+
+def authenticate_user(username: str, password: str, db):
+    user = db.query(Users).filter(Users.username == username).first()
+    if not user:
+        return False
+    if not bcrypt_context.verify(password, user.hashed_password):
+        return False
+    return True
+
+@router.post("/token")
+async def login_for_access_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: db_dependency
+):
+    user = authenticate_user(form_data.username, form_data.password, db)
+    if not user:
+        return 'Failed Authentication'
+    return 'Successful Authentication'
+```
+
+### Que significa este paso
+
+- `OAuth2PasswordRequestForm` espera credenciales tipo formulario (`username` y `password`).
+- buscamos al usuario por `username` en DB.
+- comparamos password enviada vs `hashed_password` usando `verify`.
+- si no coincide: falla autenticacion.
+- si coincide: login correcto.
+
+### Nota importante
+
+En este punto todavia no estamos generando JWT real; solo validamos si las credenciales son correctas. El siguiente paso normalmente es crear y devolver un access token.
+
+## 25. JWT Access Token Generation (`/token`)
+
+En esta sesion completamos el login para devolver un access token real (JWT) cuando las credenciales son validas.
+
+Que agregamos en `TodoApp/routers/auth.py`:
+
+- import de `datetime`, `timedelta`, `timezone`
+- import de `jwt` desde `python-jose`
+- `SECRET_KEY` y `ALGORITHM`
+- modelo `Token` con `access_token` y `token_type`
+- funcion `create_access_token(...)`
+- `response_model=Token` en `POST /token`
+
+Codigo clave:
+
+```python
+from datetime import datetime, timedelta, timezone
+from jose import jwt
+
+SECRET_KEY = '...'
+ALGORITHM = 'HS256'
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+def create_access_token(username: str, user_id: int, expires_delta: timedelta):
+    encode = {'sub': username, 'id': user_id}
+    expires = datetime.now(timezone.utc) + expires_delta
+    encode.update({'exp': expires})
+    return jwt.encode(encode, SECRET_KEY, algorithm=ALGORITHM)
+
+@router.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: db_dependency
+):
+    user = authenticate_user(form_data.username, form_data.password, db)
+    if not user:
+        return 'Failed Authentication'
+
+    token = create_access_token(user.username, user.id, timedelta(minutes=20))
+    return {'access_token': token, 'token_type': 'bearer'}
+```
+
+### Que significa este paso
+
+- si username/password son correctos, ahora devolvemos JWT.
+- el token incluye:
+  - `sub`: username
+  - `id`: user_id
+  - `exp`: fecha de expiracion
+- definimos expiracion de 20 minutos en este avance.
+
+### Nota practica
+
+- `SECRET_KEY` debe mantenerse privada (idealmente en variables de entorno).
+- este token luego se usa en endpoints protegidos con `Authorization: Bearer <token>`.
+
+## 26. Decode JWT + Current User Dependency (`get_current_user`)
+
+En esta sesion agregamos la validacion del token bearer para poder obtener al usuario actual desde el JWT.
+
+Que agregamos en `TodoApp/routers/auth.py`:
+
+- `OAuth2PasswordBearer(tokenUrl='token')`
+- import de `JWTError`
+- funcion `get_current_user(...)` con `Depends(oauth2_bearer)`
+- decode del token con `jwt.decode(...)`
+- validacion de claims `sub` e `id`
+- `HTTPException(401)` cuando el token es invalido
+
+Codigo clave:
+
+```python
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
+
+oauth2_bearer = OAuth2PasswordBearer(tokenUrl='token')
+
+async def get_current_user(token: Annotated[str, Depends(oauth2_bearer)]):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get('sub')
+        user_id: int = payload.get('id')
+        if username is None or user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail='could not validate user.'
+            )
+
+        return {'username': username, 'id': user_id}
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='could not validate user.'
+        )
+```
+
+### Que significa este paso
+
+- `oauth2_bearer` lee el token desde header `Authorization: Bearer <token>`.
+- `get_current_user` decodifica el JWT y extrae datos del usuario.
+- si el token falla, responde `401 Unauthorized`.
+- esta dependencia se reutiliza en endpoints protegidos del proyecto.
+
+### Nota practica
+
+El `tokenUrl='token'` indica a Swagger/OpenAPI donde pedir el token de login para el flujo OAuth2 password.
+
+## 27. Auth Router Prefix + Better Unauthorized Handling
+
+En esta sesion ordenamos mejor las rutas de auth y alineamos OAuth2 con ese prefijo.
+
+Cambios que hicimos en `TodoApp/routers/auth.py`:
+
+- configuramos el router con:
+  - `prefix='/auth'`
+  - `tags=['auth']`
+- cambiamos `oauth2_bearer` a:
+  - `OAuth2PasswordBearer(tokenUrl='auth/token')`
+- actualizamos endpoints:
+  - crear usuario: `POST /auth/`
+  - login token: `POST /auth/token`
+- mejoramos el error de login fallido:
+  - antes devolviamos string (`'Failed Authentication'`)
+  - ahora lanzamos `HTTPException(status_code=401, detail='could not validate user.')`
+
+Codigo clave:
+
+```python
+router = APIRouter(
+    prefix='/auth',
+    tags=['auth']
+)
+
+oauth2_bearer = OAuth2PasswordBearer(tokenUrl='auth/token')
+
+@router.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: db_dependency
+):
+    user = authenticate_user(form_data.username, form_data.password, db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='could not validate user.'
+        )
+
+    token = create_access_token(user.username, user.id, timedelta(minutes=20))
+    return {'access_token': token, 'token_type': 'bearer'}
+```
+
+### Que ganamos con este paso
+
+- rutas de auth mas limpias y agrupadas bajo `/auth`.
+- documentacion Swagger mas clara por `tags=['auth']`.
+- manejo HTTP correcto para credenciales invalidas (`401` en lugar de string).
+- `tokenUrl` consistente para el flujo OAuth2.
+
 ## Errores comunes
 
 - `TypeError: 'check_Same_thread' is an invalid keyword argument for Connection()`
