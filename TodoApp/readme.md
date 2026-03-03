@@ -904,6 +904,379 @@ async def login_for_access_token(
 - manejo HTTP correcto para credenciales invalidas (`401` en lugar de string).
 - `tokenUrl` consistente para el flujo OAuth2.
 
+## 28. Link Todo Creation to Authenticated User (`owner_id`)
+
+En esta sesion conectamos `todos.py` con auth para que cada todo nuevo quede asociado al usuario autenticado.
+
+Cambios que hicimos en `TodoApp/routers/todos.py`:
+
+- importamos `get_current_user` desde `auth.py`
+- creamos la dependencia:
+  - `user_dependency = Annotated[dict, Depends(get_current_user)]`
+- en `create_todo(...)` recibimos `user: user_dependency`
+- validamos usuario autenticado (`401` si falla)
+- guardamos `owner_id=user.get('id')` al crear el todo
+
+Codigo clave:
+
+```python
+from .auth import get_current_user
+
+user_dependency = Annotated[dict, Depends(get_current_user)]
+
+@router.post("/todo", status_code=status.HTTP_201_CREATED)
+async def create_todo(
+    user: user_dependency,
+    db: db_dependency,
+    todo_request: TodoRequest
+):
+    if user is None:
+        raise HTTPException(status_code=401, detail='Authentication Failed')
+
+    todo_model = Todos(**todo_request.model_dump(), owner_id=user.get('id'))
+    db.add(todo_model)
+    db.commit()
+```
+
+### Que ganamos con este paso
+
+- los todos dejan de ser anonimos y ahora quedan ligados a un usuario real.
+- empezamos a aplicar autorizacion por ownership (`owner_id`).
+- la base queda lista para filtrar endpoints por usuario (ej: ver solo mis todos).
+
+### Siguiente mejora natural
+
+Proteger tambien `GET /`, `GET /todo/{id}`, `PUT` y `DELETE` para que solo trabajen con todos del usuario autenticado.
+
+## 29. Protect `GET /` and Return Only My Todos
+
+En esta sesion dimos otro paso en autorizacion: ahora el listado de todos ya no devuelve todo global, sino solo los todos del usuario autenticado.
+
+Cambios que hicimos en `TodoApp/routers/todos.py`:
+
+- agregamos `user: user_dependency` en `read_all(...)`
+- filtramos query por `owner_id == user.get('id')`
+
+Codigo clave:
+
+```python
+@router.get("/", status_code=status.HTTP_200_OK)
+async def read_all(user: user_dependency, db: db_dependency):
+    return db.query(Todos).filter(Todos.owner_id == user.get('id')).all()
+```
+
+### Que ganamos con este paso
+
+- cada usuario ve solo sus propios todos.
+- dejamos de exponer todos de otros usuarios en el endpoint de lista.
+- reforzamos el modelo de ownership con JWT + `owner_id`.
+
+### Nota
+
+`read_todo`, `update_todo` y `delete_todo` todavia no filtran por `owner_id` en este punto. Ese seria el siguiente hardening para que todo CRUD quede consistente con autorizacion por usuario.
+
+## 30. Protect `GET /todo/{todo_id}` by Owner
+
+En esta sesion seguimos endureciendo autorizacion en `todos.py`.
+
+Cambios que hicimos:
+
+- en `read_all(...)` agregamos validacion explicita:
+  - `if user is None: raise HTTPException(401, 'Authentication Failed')`
+- en `read_todo(...)` ahora pedimos `user: user_dependency`
+- en `read_todo(...)` filtramos por:
+  - `Todos.id == todo_id`
+  - `Todos.owner_id == user.get('id')`
+
+Codigo clave:
+
+```python
+@router.get("/", status_code=status.HTTP_200_OK)
+async def read_all(user: user_dependency, db: db_dependency):
+    if user is None:
+        raise HTTPException(status_code=401, detail='Authentication Failed')
+    return db.query(Todos).filter(Todos.owner_id == user.get('id')).all()
+
+@router.get("/todo/{todo_id}", status_code=status.HTTP_200_OK)
+async def read_todo(user: user_dependency, db: db_dependency, todo_id: int = Path(gt=0)):
+    if user is None:
+        raise HTTPException(status_code=401, detail='Authentication Failed')
+
+    todo_model = db.query(Todos).filter(Todos.id == todo_id)\
+        .filter(Todos.owner_id == user.get('id')).first()
+
+    if todo_model is not None:
+        return todo_model
+    raise HTTPException(status_code=404, detail='Todo not found buddy.')
+```
+
+### Que ganamos con este paso
+
+- un usuario ya no puede leer por id un todo que no le pertenece.
+- reforzamos ownership en lectura de lista y lectura individual.
+- respuesta de auth queda consistente (`401`) cuando falta/expira token.
+
+### Siguiente mejora natural
+
+Aplicar la misma logica de ownership a `PUT /todo/{todo_id}` y `DELETE /todo/{todo_id}` para cerrar todo el CRUD protegido.
+
+## 31. Protect `PUT /todo/{todo_id}` by Owner
+
+En esta sesion seguimos cerrando autorizacion en el CRUD y ahora protegimos el update por ownership.
+
+Cambios que hicimos en `TodoApp/routers/todos.py`:
+
+- en `update_todo(...)` agregamos `user: user_dependency`
+- validamos token/usuario:
+  - `if user is None: raise HTTPException(401, 'Authentication Failed')`
+- buscamos el todo por:
+  - `Todos.id == todo_id`
+  - `Todos.owner_id == user.get('id')`
+- si no existe ese registro para ese usuario: `404`
+
+Codigo clave:
+
+```python
+@router.put("/todo/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def update_todo(
+    user: user_dependency,
+    db: db_dependency,
+    todo_request: TodoRequest,
+    todo_id: int = Path(gt=0)
+):
+    if user is None:
+        raise HTTPException(status_code=401, detail='Authentication Failed')
+
+    todo_model = db.query(Todos).filter(Todos.id == todo_id)\
+        .filter(Todos.owner_id == user.get('id')).first()
+
+    if todo_model is None:
+        raise HTTPException(status_code=404, detail='Todo not found buddy.')
+
+    todo_model.title = todo_request.title
+    todo_model.description = todo_request.description
+    todo_model.priority = todo_request.priority
+    todo_model.complete = todo_request.complete
+
+    db.add(todo_model)
+    db.commit()
+```
+
+### Que ganamos con este paso
+
+- ya no se puede editar un todo de otro usuario.
+- update queda alineado con la seguridad que ya teniamos en lectura.
+- ownership del modelo (`owner_id`) se respeta tambien en escritura.
+
+### Siguiente mejora natural
+
+Aplicar la misma regla en `DELETE /todo/{todo_id}` para completar el CRUD protegido por usuario.
+
+## 32. Protect `DELETE /todo/{todo_id}` by Owner (CRUD Fully Secured)
+
+En esta sesion cerramos el hardening del CRUD: ahora delete tambien valida usuario autenticado y ownership.
+
+Cambios que hicimos en `TodoApp/routers/todos.py`:
+
+- en `delete_todo(...)` agregamos `user: user_dependency`
+- validamos token/usuario:
+  - `if user is None: raise HTTPException(401, 'Authentication Failed')`
+- buscamos el todo por:
+  - `Todos.id == todo_id`
+  - `Todos.owner_id == user.get('id')`
+- eliminamos con el mismo filtro de ownership
+
+Codigo clave:
+
+```python
+@router.delete("/todo/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_todo(user: user_dependency, db: db_dependency, todo_id: int = Path(gt=0)):
+    if user is None:
+        raise HTTPException(status_code=401, detail='Authentication Failed')
+
+    todo_model = db.query(Todos).filter(Todos.id == todo_id)\
+        .filter(Todos.owner_id == user.get('id')).first()
+
+    if todo_model is None:
+        raise HTTPException(status_code=404, detail='Todo not found buddy.')
+
+    db.query(Todos).filter(Todos.id == todo_id)\
+        .filter(Todos.owner_id == user.get('id')).delete()
+    db.commit()
+```
+
+### Que ganamos con este paso
+
+- ya no se puede borrar un todo de otro usuario.
+- CRUD queda consistente con autorizacion por ownership:
+  - `GET /`
+  - `GET /todo/{todo_id}`
+  - `POST /todo`
+  - `PUT /todo/{todo_id}`
+  - `DELETE /todo/{todo_id}`
+- modelo multiusuario mas seguro y listo para seguir escalando.
+
+## 33. Admin Router (`/admin`) + Role-Based Access
+
+En esta sesion creamos un router exclusivo para admin con endpoints que pueden ver/borrar todos los todos sin filtro por owner.
+
+Archivos tocados:
+
+- `TodoApp/routers/admin.py`
+- `TodoApp/main.py`
+
+Cambios que hicimos en `admin.py`:
+
+- creamos router con:
+  - `prefix='/admin'`
+  - `tags=['admin']`
+- reutilizamos `get_current_user` como dependencia de auth
+- validamos rol admin antes de ejecutar acciones
+- agregamos endpoints:
+  - `GET /admin/todo` -> devuelve todos los todos
+  - `DELETE /admin/todo/{todo_id}` -> elimina cualquier todo por id
+
+Codigo clave:
+
+```python
+router = APIRouter(
+    prefix='/admin',
+    tags=['admin']
+)
+
+@router.get("/todo", status_code=status.HTTP_200_OK)
+async def read_all(user: user_dependency, db: db_dependency):
+    if user is None or user.get("user_role", "").lower() != "admin":
+        raise HTTPException(status_code=401, detail="Authentication Failed")
+    return db.query(Todos).all()
+
+@router.delete("/todo/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_todo(user: user_dependency, db: db_dependency, todo_id: int = Path(gt=0)):
+    if user is None or user.get('user_role').lower() != 'admin':
+        raise HTTPException(status_code=401, detail='Authentication Failed')
+
+    todo_model = db.query(Todos).filter(Todos.id == todo_id).first()
+    if todo_model is None:
+        raise HTTPException(status_code=404, detail='Todo not found.')
+
+    db.query(Todos).filter(Todos.id == todo_id).delete()
+    db.commit()
+```
+
+Conexion en `main.py`:
+
+```python
+from routers import auth, todos, admin
+
+app.include_router(auth.router)
+app.include_router(todos.router)
+app.include_router(admin.router)
+```
+
+### Que ganamos con este paso
+
+- separamos funciones administrativas del flujo normal de usuario.
+- dejamos una base clara para control de acceso por rol (RBAC).
+- mantenemos `todos.py` enfocado en operaciones del dueño del recurso.
+
+### Nota importante
+
+Para que la validacion de rol funcione al 100%, el `get_current_user` debe devolver `user_role` (o leerlo desde DB/JWT) porque en este punto la validacion usa `user.get("user_role")`.
+
+## 34. User Router (`/user`) + Profile + Change Password
+
+En esta sesion agregamos un router para acciones del usuario autenticado (perfil y cambio de password).
+
+Archivos tocados:
+
+- `TodoApp/routers/users.py`
+- `TodoApp/main.py`
+- `TodoApp/routers/auth.py`
+
+### 1. Nuevo router de usuario
+
+Creamos `APIRouter` con:
+
+- `prefix='/user'`
+- `tags=['user']`
+
+Y lo conectamos en `main.py`:
+
+```python
+from routers import auth, todos, admin, users
+
+app.include_router(auth.router)
+app.include_router(todos.router)
+app.include_router(admin.router)
+app.include_router(users.router)
+```
+
+### 2. Endpoint para ver mi perfil
+
+En `users.py`:
+
+```python
+@router.get("/", status_code=status.HTTP_200_OK)
+async def get_user(user: user_dependency, db: db_dependency):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication Failed")
+
+    return db.query(Users).filter(Users.id == user.get('id')).first()
+```
+
+Con esto, `GET /user/` devuelve la fila del usuario autenticado.
+
+### 3. Endpoint para cambiar password
+
+Schema:
+
+```python
+class UserVerification(BaseModel):
+    password: str
+    new_password: str = Field(min_length=6)
+```
+
+Endpoint:
+
+```python
+@router.put("change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(user: user_dependency, db: db_dependency, user_verification: UserVerification):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication Failed")
+
+    user_model = db.query(Users).filter(Users.id == user.get('id')).first()
+
+    if not bcrypt_context.verify(user_verification.password, user_model.hashed_password):
+        raise HTTPException(status_code=401, detail='Error on password change')
+
+    user_model.hashed_password = bcrypt_context.hash(user_verification.new_password)
+    db.add(user_model)
+    db.commit()
+```
+
+Que hace:
+
+- valida usuario autenticado
+- verifica password actual contra hash guardado
+- hashea el `new_password`
+- guarda el nuevo hash en DB
+
+### 4. Ajuste en JWT para soporte de rol
+
+Tambien dejamos `auth.py` devolviendo role en el token y en `get_current_user`:
+
+- `create_access_token(..., role, ...)` guarda claim `role`
+- `get_current_user(...)` retorna:
+  - `username`
+  - `id`
+  - `user_role`
+
+Esto alimenta tanto rutas admin como rutas user.
+
+### Nota rapida
+
+En tu codigo actual, el decorator de cambio de password esta como `@router.put("change-password", ...)` (sin `/` inicial). Si quieres mantener consistencia de rutas, normalmente se usa `@router.put("/change-password", ...)`.
+
 ## Errores comunes
 
 - `TypeError: 'check_Same_thread' is an invalid keyword argument for Connection()`
