@@ -1277,6 +1277,79 @@ Esto alimenta tanto rutas admin como rutas user.
 
 En tu codigo actual, el decorator de cambio de password esta como `@router.put("change-password", ...)` (sin `/` inicial). Si quieres mantener consistencia de rutas, normalmente se usa `@router.put("/change-password", ...)`.
 
+## 35. Migracion de SQLite a PostgreSQL (`database.py`)
+
+En esta sesion cambiamos la conexion principal de la app para usar PostgreSQL en lugar de SQLite.
+
+Cambio principal en `TodoApp/database.py`:
+
+```python
+# SQLALCHEMY_DATABASE_URL = 'sqlite:///./todosapp.db'
+SQLALCHEMY_DATABASE_URL = 'postgresql://postgres:***@127.0.0.1/TodoApplicationDatabase'
+
+# engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False})
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+```
+
+### Que cambia al pasar a Postgres
+
+- ya no usamos `connect_args={"check_same_thread": False}` (eso era solo para SQLite).
+- la URL ahora apunta a un servidor DB real (`postgresql://...`).
+- los datos ya no viven en archivo local `.db`, ahora viven en la instancia de Postgres.
+
+### Dependencia importante
+
+Para conectar SQLAlchemy con PostgreSQL necesitas un driver de Postgres en el entorno (por ejemplo `psycopg2-binary` o `psycopg`).
+
+Ejemplo rapido:
+
+```powershell
+pip install psycopg2-binary
+```
+
+### Recomendacion de seguridad
+
+Evitar credenciales hardcodeadas en el repo.
+
+Mejor opcion:
+
+- mover `SQLALCHEMY_DATABASE_URL` a variable de entorno (ej: `.env`)
+- leerla desde `os.getenv(...)`
+
+### Nota de migracion
+
+Si vienes de SQLite y quieres conservar datos, esta migracion requiere export/import o migraciones (Alembic). Si estas aprendiendo y no te importa perder data de prueba, puedes recrear esquema en Postgres desde cero.
+
+## 36. Opcion alternativa: MySQL con `pymysql`
+
+En esta sesion tambien dejamos comentada una opcion de conexion a MySQL usando SQLAlchemy + `pymysql`.
+
+Linea que dejaste en `TodoApp/database.py`:
+
+```python
+# SQLALCHEMY_DATABASE_URL = 'mysql+pymysql://root:test1234!@127.0.0.1:3306/TodoApplicationDatabase'
+```
+
+Formato general:
+
+```text
+mysql+pymysql://<usuario>:<password>@<host>:<puerto>/<database>
+```
+
+Dependencia necesaria:
+
+```powershell
+pip install pymysql
+```
+
+Uso practico:
+
+1. descomentar la linea de MySQL
+2. comentar la linea activa de Postgres
+3. ejecutar la app para que SQLAlchemy conecte al motor MySQL
+
+Nota: igual que en Postgres, evita dejar user/password hardcodeados en código y usa variables de entorno.
+
 ## Errores comunes
 
 - `TypeError: 'check_Same_thread' is an invalid keyword argument for Connection()`
